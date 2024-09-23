@@ -48,25 +48,27 @@ def create_line_detection_model():
 
 def line_detection_loss(y_true, y_pred):
     obj_mask = y_true[..., 0]
-    # tf.print("Object Mask Sum:", tf.reduce_sum(obj_mask))
     pred_confidence = y_pred[..., 0]
-
-    confidence_loss = tf.keras.backend.binary_crossentropy(obj_mask, pred_confidence)
-    confidence_loss = tf.reduce_sum(confidence_loss * obj_mask) / (tf.reduce_sum(obj_mask) + 1e-6)
-
+    # 가중치 설정
+    lambda_obj = 5.0
+    lambda_noobj = 1.0
+    # 객체가 있는 위치와 없는 위치에 대한 신뢰도 손실 계산
+    confidence_loss_obj = lambda_obj * obj_mask * tf.keras.backend.binary_crossentropy(obj_mask, pred_confidence)
+    confidence_loss_noobj = lambda_noobj * (1 - obj_mask) * tf.keras.backend.binary_crossentropy(obj_mask, pred_confidence)
+    confidence_loss = tf.reduce_sum(confidence_loss_obj + confidence_loss_noobj) / (GRID_SIZE * GRID_SIZE * NUM_LINES)
+    # 파라미터 손실 계산
     rho_loss = tf.square(y_true[..., 1] - y_pred[..., 1])
     theta_diff = y_true[..., 2] - y_pred[..., 2]
     theta_diff = tf.math.floormod(theta_diff + np.pi, 2 * np.pi) - np.pi
-    theta_loss = tf.square(theta_diff)
+    theta_loss = tf.square(theta_diff / np.pi)  # theta 차이를 정규화
     param_loss = rho_loss + theta_loss
     param_loss = obj_mask * param_loss
     param_loss = tf.reduce_sum(param_loss) / (tf.reduce_sum(obj_mask) + 1e-6)
-
-    total_loss = confidence_loss + param_loss
-
-    # tf.print("Confidence Loss:", confidence_loss, "Param Loss:", param_loss, "Total Loss:", total_loss)
-
+    # 총 손실 계산
+    lambda_coord = 5.0
+    total_loss = confidence_loss + lambda_coord * param_loss
     return total_loss
+
 
 
 def load_data(data_dir, batch_size):
@@ -219,9 +221,6 @@ def inference_and_display(model, image_paths):
         for rho, theta in detected_lines:
             a = np.cos(theta)
             b = np.sin(theta)
-
-            # x0 = center_x + a * rho
-            # y0 = center_y + b * rho
 
             x0 = a * rho
             y0 = b * rho
