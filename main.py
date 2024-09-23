@@ -183,7 +183,7 @@ model.compile(optimizer=optimizer, loss=line_detection_loss)
 
 batch_size = 16
 steps_per_epoch = 113
-epochs = 5
+epochs = 20
 
 data_dir = r'D:\Work\04_Samsung_Pyeongtak_WIND2\Data'
 
@@ -195,13 +195,21 @@ def inference_and_display(model, image_paths):
     for image_path in image_paths:
         image = cv2.imread(image_path)
         original_height, original_width = image.shape[:2]
+
         image_resized = cv2.resize(image, (INPUT_SIZE, INPUT_SIZE))
         input_image = image_resized / 255.0
         input_tensor = tf.expand_dims(input_image, axis=0)  # [1, INPUT_SIZE, INPUT_SIZE, 3]
 
-        # 모델 추론
         preds = model.predict(input_tensor)
         preds = preds[0]
+
+        scale_x = original_width / INPUT_SIZE
+        scale_y = original_height / INPUT_SIZE
+
+        resized_diagonal = np.sqrt(INPUT_SIZE ** 2 + INPUT_SIZE ** 2)
+        original_diagonal = np.sqrt(original_width ** 2 + original_height ** 2)
+
+        rho_scale = original_diagonal / resized_diagonal
 
         detected_lines = []
         for i in range(GRID_SIZE):
@@ -211,30 +219,29 @@ def inference_and_display(model, image_paths):
                     if confidence > 0.5:
                         rho = preds[i, j, k, 1]
                         theta = preds[i, j, k, 2]
-                        image_diagonal = np.sqrt(original_width ** 2 + original_height ** 2)
-                        rho = rho * image_diagonal
+
+                        # `rho` 복원
+                        rho = rho * resized_diagonal
+                        rho = rho * rho_scale
+
                         detected_lines.append((rho, theta))
 
         image_with_lines = image.copy()
-        center_x = original_width / 2
-        center_y = original_height / 2
+
         for rho, theta in detected_lines:
+            # 극좌표 (rho, theta)를 직선의 두 점 (x1, y1), (x2, y2)로 변환
             a = np.cos(theta)
             b = np.sin(theta)
-
             x0 = a * rho
             y0 = b * rho
+            x1 = int(x0 + 1000 * (-b))  # 직선을 길게 그리기 위해 임의로 1000픽셀 확대
+            y1 = int(y0 + 1000 * (a))
+            x2 = int(x0 - 1000 * (-b))
+            y2 = int(y0 - 1000 * (a))
 
-            scale = max(original_width, original_height) * 1.5
-
-            # 시작점과 끝점 계산
-            x1 = int(x0 + scale * (-b))
-            y1 = int(y0 + scale * (a))
-            x2 = int(x0 - scale * (-b))
-            y2 = int(y0 - scale * (a))
-
-            # 선분을 이미지 위에 그리기
+            # 빨간색으로 직선 그리기
             cv2.line(image_with_lines, (x1, y1), (x2, y2), (0, 0, 255), 2)
+
 
         print(detected_lines)
         cv2.imshow('Detected Lines', image_with_lines)
@@ -250,5 +257,5 @@ def run_inference_on_folder(model, test_dir):
     test_image_paths = [os.path.join(test_dir, f) for f in test_image_files]
     inference_and_display(model, test_image_paths)
 
-test_dir = r'D:\Work\04_Samsung_Pyeongtak_WIND2\Data'
+test_dir = r'D:\Work\04_Samsung_Pyeongtak_WIND2\Data_orig'
 run_inference_on_folder(model, test_dir)
