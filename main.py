@@ -3,10 +3,94 @@ import numpy as np
 import os
 import cv2
 
+# Constants
 INPUT_SIZE = 416
 GRID_SIZE = 13
 NUM_LINES = 3
 NUM_CLASSES = 1
+TRAIN_VAL_SPLIT = 0.2
+
+
+class BatchNormalization(tf.keras.layers.BatchNormalization):
+    """
+    "Frozen state" and "inference mode" are two separate concepts.
+    `layer.trainable = False` is to freeze the layer, so the layer will use
+    stored moving `var` and `mean` in the "inference mode", and both `gama`
+    and `beta` will not be updated !
+    """
+    def call(self, x, training=False):
+        if not training:
+            training = tf.constant(False)
+        training = tf.logical_and(training, self.trainable)
+        return super().call(x, training)
+
+
+def route_group(input_layer, groups, group_id):
+    convs = tf.split(input_layer, num_or_size_splits=groups, axis=-1)
+    return convs[group_id]
+
+
+def convolutional(input_layer, filters_shape, strides=1, padding='same',
+                  kernal_initializer=tf.random_normal_initializer(stddev=0.01), downsample=False, activate=True,
+                  bn=True, activate_type='leaky'):
+    if downsample:
+        input_layer = tf.keras.layers.ZeroPadding2D(((1, 0), (1, 0)))(input_layer)
+        padding = 'valid'
+        strides = 2
+
+    conv = tf.keras.layers.Conv2D(filters=filters_shape[-1], kernel_size=filters_shape[0], strides=strides,
+                                  padding=padding, use_bias=not bn, kernel_regularizer=tf.keras.regularizers.l2(0.0005),
+                                  kernel_initializer=kernal_initializer,
+                                  bias_initializer=tf.constant_initializer(0.))(input_layer)
+
+    if bn: conv = BatchNormalization()(conv)
+
+    if activate == True:
+        if activate_type == "leaky":
+            conv = tf.keras.activations.relu(conv, alpha=0.1)
+    return conv
+
+
+def cspdarknet53_tiny(input_data):
+    input_data = convolutional(input_data, (3, 3, 3, 32), downsample=True)
+    input_data = convolutional(input_data, (3, 3, 32, 64), downsample=True)
+    input_data = convolutional(input_data, (3, 3, 64, 64))
+
+    route = input_data
+    input_data = route_group(input_data, 2, 1)
+    input_data = convolutional(input_data, (3, 3, 32, 32))
+    route_1 = input_data
+    input_data = convolutional(input_data, (3, 3, 32, 32))
+    input_data = tf.concat([input_data, route_1], axis=-1)
+    input_data = convolutional(input_data, (1, 1, 32, 64))
+    input_data = tf.concat([route, input_data], axis=-1)
+    input_data = tf.keras.layers.MaxPool2D(2, 2, 'same')(input_data)
+
+    input_data = convolutional(input_data, (3, 3, 64, 128))
+    route = input_data
+    input_data = route_group(input_data, 2, 1)
+    input_data = convolutional(input_data, (3, 3, 64, 64))
+    route_1 = input_data
+    input_data = convolutional(input_data, (3, 3, 64, 64))
+    input_data = tf.concat([input_data, route_1], axis=-1)
+    input_data = convolutional(input_data, (1, 1, 64, 128))
+    input_data = tf.concat([route, input_data], axis=-1)
+    input_data = tf.keras.layers.MaxPool2D(2, 2, 'same')(input_data)
+
+    input_data = convolutional(input_data, (3, 3, 128, 256))
+    route = input_data
+    input_data = route_group(input_data, 2, 1)
+    input_data = convolutional(input_data, (3, 3, 128, 128))
+    route_1 = input_data
+    input_data = convolutional(input_data, (3, 3, 128, 128))
+    input_data = tf.concat([input_data, route_1], axis=-1)
+    input_data = convolutional(input_data, (1, 1, 128, 256))
+    input_data = tf.concat([route, input_data], axis=-1)
+    input_data = tf.keras.layers.MaxPool2D(2, 2, 'same')(input_data)
+
+    input_data = convolutional(input_data, (3, 3, 512, 512))
+
+    return input_data
 
 
 def create_line_detection_model():
@@ -46,38 +130,68 @@ def create_line_detection_model():
     return tf.keras.models.Model(inputs=inputs, outputs=outputs)
 
 
+# def create_line_detection_model():
+#     inputs = tf.keras.layers.Input([INPUT_SIZE, INPUT_SIZE, 3])
+#
+#     x = cspdarknet53_tiny(inputs)
+#
+#     global GRID_SIZE
+#     GRID_SIZE = x.shape[1]
+#
+#     x = tf.keras.layers.Conv2D(NUM_LINES * (1 + 2 + NUM_CLASSES), 1, padding='same')(x)
+#     x = tf.keras.layers.Reshape((GRID_SIZE, GRID_SIZE, NUM_LINES, 3 + NUM_CLASSES))(x)
+#
+#     line_confidence = tf.sigmoid(x[..., 0])
+#     rho = tf.sigmoid(x[..., 1])
+#     theta = x[..., 2]
+#
+#     theta = tf.tanh(theta) * np.pi
+#
+#     if NUM_CLASSES > 1:
+#         class_probs = tf.nn.softmax(x[..., 3:])
+#     else:
+#         class_probs = tf.sigmoid(x[..., 3])
+#
+#     outputs = tf.concat([line_confidence[..., tf.newaxis],
+#                          rho[..., tf.newaxis],
+#                          theta[..., tf.newaxis],
+#                          class_probs[..., tf.newaxis]],
+#                         axis=-1)
+#     return tf.keras.models.Model(inputs=inputs, outputs=outputs)
+
+
 def line_detection_loss(y_true, y_pred):
     obj_mask = y_true[..., 0]
     pred_confidence = y_pred[..., 0]
-    # 가중치 설정
     lambda_obj = 5.0
     lambda_noobj = 1.0
-    # 객체가 있는 위치와 없는 위치에 대한 신뢰도 손실 계산
+
     confidence_loss_obj = lambda_obj * obj_mask * tf.keras.backend.binary_crossentropy(obj_mask, pred_confidence)
     confidence_loss_noobj = lambda_noobj * (1 - obj_mask) * tf.keras.backend.binary_crossentropy(obj_mask, pred_confidence)
     confidence_loss = tf.reduce_sum(confidence_loss_obj + confidence_loss_noobj) / (GRID_SIZE * GRID_SIZE * NUM_LINES)
-    # 파라미터 손실 계산
+
     rho_loss = tf.square(y_true[..., 1] - y_pred[..., 1])
     theta_diff = y_true[..., 2] - y_pred[..., 2]
     theta_diff = tf.math.floormod(theta_diff + np.pi, 2 * np.pi) - np.pi
-    theta_loss = tf.square(theta_diff / np.pi)  # theta 차이를 정규화
+    theta_loss = tf.square(theta_diff / np.pi)
     param_loss = rho_loss + theta_loss
     param_loss = obj_mask * param_loss
     param_loss = tf.reduce_sum(param_loss) / (tf.reduce_sum(obj_mask) + 1e-6)
-    # 총 손실 계산
+
     lambda_coord = 5.0
     total_loss = confidence_loss + lambda_coord * param_loss
     return total_loss
 
 
-
-def load_data(data_dir, batch_size):
+def load_data(data_dir, batch_size, valid_ratio):
+    # Get all image and label file paths
     image_files = [f for f in os.listdir(data_dir) if f.lower().endswith(('.jpg', '.png', '.jpeg'))]
     image_files.sort()
 
     image_paths = [os.path.join(data_dir, f) for f in image_files]
     label_paths = [os.path.join(data_dir, os.path.splitext(f)[0] + '.txt') for f in image_files]
 
+    # Create dataset from file paths
     dataset = tf.data.Dataset.from_tensor_slices((image_paths, label_paths))
 
     def parse_function(image_path, label_path):
@@ -86,9 +200,11 @@ def load_data(data_dir, batch_size):
         original_height = tf.shape(image)[0]
         original_width = tf.shape(image)[1]
 
+        # Resize and normalize the image
         image = tf.image.resize(image, [INPUT_SIZE, INPUT_SIZE])
         image = image / 255.0
 
+        # Read and process labels
         labels = tf.io.read_file(label_path)
         labels = tf.strings.strip(labels)
         lines = tf.strings.split(labels, '\n')
@@ -99,10 +215,7 @@ def load_data(data_dir, batch_size):
 
         num_labels = tf.shape(labels)[0]
 
-        # tf.print("Label path:", label_path)
-        # tf.print("Labels tensor:", labels)
-        # tf.print("Number of labels:", num_labels)
-
+        # Process the image and labels based on the number of labels
         def process_with_labels():
             rho = labels[:, 0]
             theta = labels[:, 1]
@@ -123,10 +236,8 @@ def load_data(data_dir, batch_size):
             rho_expanded = tf.reshape(rho, [-1, 1, 1])
             distances = x * cos_theta_expanded + y * sin_theta_expanded - rho_expanded
             distances = tf.abs(distances)
-            # tf.print("Distances min:", tf.reduce_min(distances), "max:", tf.reduce_max(distances))
             threshold = 20.0
             mask = distances < threshold
-            # tf.print("Mask sum:", tf.reduce_sum(tf.cast(mask, tf.int32)))
             mask_transposed = tf.transpose(mask, perm=[1, 2, 0])
 
             def select_labels_per_cell(cell_mask):
@@ -168,27 +279,49 @@ def load_data(data_dir, batch_size):
         image, label_tensor = tf.cond(num_labels > 0, process_with_labels, process_without_labels)
         return image, label_tensor
 
+    # Shuffle and map the dataset
     dataset = dataset.map(parse_function, num_parallel_calls=tf.data.experimental.AUTOTUNE)
     dataset = dataset.shuffle(buffer_size=1000)
-    dataset = dataset.batch(batch_size)
-    dataset = dataset.prefetch(tf.data.experimental.AUTOTUNE)
-    return dataset
 
+    # Calculate the number of validation samples
+    num_samples = len(image_paths)
+    num_valid_samples = int(num_samples * valid_ratio)
 
+    # Split the dataset
+    valid_dataset = dataset.take(num_valid_samples)
+    train_dataset = dataset.skip(num_valid_samples)
+
+    # Batch and prefetch datasets
+    train_dataset = train_dataset.batch(batch_size).prefetch(tf.data.experimental.AUTOTUNE)
+    valid_dataset = valid_dataset.batch(batch_size).prefetch(tf.data.experimental.AUTOTUNE)
+
+    return train_dataset, valid_dataset
+
+# Configuration
+data_dir = r'D:\Work\04_Samsung_Pyeongtak_WIND2\Data'
+batch_size = 16
+valid_ratio = 0.2  # Validation ratio
+
+# Load data
+train_dataset, valid_dataset = load_data(data_dir, batch_size, valid_ratio)
+steps_per_epoch = sum(1 for _ in train_dataset)
+validation_steps = sum(1 for _ in valid_dataset)
+
+# Model creation
 model = create_line_detection_model()
 model.summary()
 
+# Model compilation
 optimizer = tf.keras.optimizers.Adam(learning_rate=0.001)
 model.compile(optimizer=optimizer, loss=line_detection_loss)
 
-batch_size = 16
-steps_per_epoch = 113
-epochs = 20
-
-data_dir = r'D:\Work\04_Samsung_Pyeongtak_WIND2\Data'
-
-train_data = load_data(data_dir, batch_size)
-model.fit(train_data, steps_per_epoch=steps_per_epoch, epochs=epochs)
+# Training
+epochs = 100
+model.fit(train_dataset,
+          steps_per_epoch=steps_per_epoch,
+          validation_data=valid_dataset,
+          validation_steps=validation_steps,
+          epochs=epochs)
 
 
 def inference_and_display(model, image_paths):
@@ -220,7 +353,6 @@ def inference_and_display(model, image_paths):
                         rho = preds[i, j, k, 1]
                         theta = preds[i, j, k, 2]
 
-                        # `rho` 복원
                         rho = rho * resized_diagonal
                         rho = rho * rho_scale
 
@@ -229,17 +361,15 @@ def inference_and_display(model, image_paths):
         image_with_lines = image.copy()
 
         for rho, theta in detected_lines:
-            # 극좌표 (rho, theta)를 직선의 두 점 (x1, y1), (x2, y2)로 변환
             a = np.cos(theta)
             b = np.sin(theta)
             x0 = a * rho
             y0 = b * rho
-            x1 = int(x0 + 1000 * (-b))  # 직선을 길게 그리기 위해 임의로 1000픽셀 확대
+            x1 = int(x0 + 1000 * (-b))
             y1 = int(y0 + 1000 * (a))
             x2 = int(x0 - 1000 * (-b))
             y2 = int(y0 - 1000 * (a))
 
-            # 빨간색으로 직선 그리기
             cv2.line(image_with_lines, (x1, y1), (x2, y2), (0, 0, 255), 2)
 
 
