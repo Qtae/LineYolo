@@ -315,13 +315,20 @@ model.summary()
 optimizer = tf.keras.optimizers.Adam(learning_rate=0.001)
 model.compile(optimizer=optimizer, loss=line_detection_loss)
 
+early_stopping = tf.keras.callbacks.EarlyStopping(
+    monitor='val_loss',
+    patience=5,
+    restore_best_weights=True
+)
+
 # Training
 epochs = 100
 model.fit(train_dataset,
           steps_per_epoch=steps_per_epoch,
           validation_data=valid_dataset,
           validation_steps=validation_steps,
-          epochs=epochs)
+          epochs=epochs,
+          callbacks=[early_stopping])
 
 
 def inference_and_display(model, image_paths):
