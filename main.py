@@ -8,6 +8,7 @@ GRID_SIZE = 13
 NUM_LINES = 3
 NUM_CLASSES = 1
 
+
 def create_line_detection_model():
     inputs = tf.keras.layers.Input([INPUT_SIZE, INPUT_SIZE, 3])
 
@@ -47,21 +48,38 @@ def create_line_detection_model():
     model = tf.keras.models.Model(inputs=inputs, outputs=outputs)
     return model
 
+
 def line_detection_loss(y_true, y_pred):
-    obj_mask = y_true[..., 0]
-    confidence_loss = tf.keras.losses.binary_crossentropy(obj_mask, y_pred[..., 0])
+    """
+    y_true와 y_pred의 형태:
+    [batch_size, GRID_SIZE, GRID_SIZE, NUM_LINES, 3 + NUM_CLASSES]
+    """
+    # 직선 존재 여부 손실 (Binary Cross-Entropy)
+    obj_mask = y_true[..., 0]  # [batch_size, GRID_SIZE, GRID_SIZE, NUM_LINES]
+    pred_confidence = y_pred[..., 0]  # [batch_size, GRID_SIZE, GRID_SIZE, NUM_LINES]
 
-    rho_loss = tf.square(y_true[..., 1] - y_pred[..., 1])
+    # 요소별로 binary cross-entropy 손실 계산
+    confidence_loss = tf.keras.backend.binary_crossentropy(obj_mask,
+                                                           pred_confidence)  # [batch_size, GRID_SIZE, GRID_SIZE, NUM_LINES]
 
+    # 파라미터 손실
+    # rho 손실 (Mean Squared Error)
+    rho_loss = tf.square(y_true[..., 1] - y_pred[..., 1])  # [batch_size, GRID_SIZE, GRID_SIZE, NUM_LINES]
+
+    # theta 손실 (주기성 고려)
     theta_diff = y_true[..., 2] - y_pred[..., 2]
-    theta_diff = tf.math.floormod(theta_diff + np.pi, 2 * np.pi) - np.pi
-    theta_loss = tf.square(theta_diff)
+    theta_diff = tf.math.floormod(theta_diff + np.pi, 2 * np.pi) - np.pi  # [-π, π] 범위로 조정
+    theta_loss = tf.square(theta_diff)  # [batch_size, GRID_SIZE, GRID_SIZE, NUM_LINES]
 
-    param_loss = rho_loss + theta_loss
-    param_loss = obj_mask * param_loss
+    param_loss = rho_loss + theta_loss  # [batch_size, GRID_SIZE, GRID_SIZE, NUM_LINES]
+    param_loss = obj_mask * param_loss  # 직선이 존재하는 위치에 대해서만 계산
 
-    total_loss = tf.reduce_mean(confidence_loss + param_loss)
+    # 총 손실 계산
+    total_loss = confidence_loss + param_loss  # [batch_size, GRID_SIZE, GRID_SIZE, NUM_LINES]
+    total_loss = tf.reduce_mean(total_loss)  # 배치 전체에 대해 평균 계산
+
     return total_loss
+
 
 def load_data(data_dir, batch_size):
     # 이미지 파일과 레이블 파일의 전체 경로를 생성
@@ -192,6 +210,7 @@ def load_data(data_dir, batch_size):
     dataset = dataset.prefetch(tf.data.experimental.AUTOTUNE)
     return dataset
 
+
 model = create_line_detection_model()
 model.summary()
 
@@ -206,6 +225,7 @@ data_dir = r'D:\Work\04_Samsung_Pyeongtak_WIND2\Data'
 
 train_data = load_data(data_dir, batch_size)
 model.fit(train_data, steps_per_epoch=steps_per_epoch, epochs=epochs)
+
 
 def inference(model, image):
     image = tf.expand_dims(image, axis=0)
@@ -226,6 +246,7 @@ def inference(model, image):
                     detected_lines.append([rho, theta])
 
     return detected_lines
+
 
 test_image_path = r'D:\Work\04_Samsung_Pyeongtak_WIND2\Data\FAIL_1.00_after.jpg'
 image = tf.io.read_file(test_image_path)
