@@ -11,19 +11,25 @@ NUM_CLASSES = 1
 def create_line_detection_model():
     inputs = tf.keras.layers.Input([INPUT_SIZE, INPUT_SIZE, 3])
 
-    # Backbone 네트워크 (예시로 간단한 CNN 사용)
-    x = tf.keras.layers.Conv2D(32, 3, padding='same', activation='relu')(inputs)
-    x = tf.keras.layers.MaxPooling2D(2)(x)
-    x = tf.keras.layers.Conv2D(64, 3, padding='same', activation='relu')(x)
-    x = tf.keras.layers.MaxPooling2D(2)(x)
-    x = tf.keras.layers.Conv2D(128, 3, padding='same', activation='relu')(x)
-    x = tf.keras.layers.MaxPooling2D(2)(x)
+    # 기존 레이어들
+    x = tf.keras.layers.Conv2D(32, 3, padding='same', activation='relu')(inputs)    # [416,416,32]
+    x = tf.keras.layers.MaxPooling2D(2)(x)  # [208,208,32]
+    x = tf.keras.layers.Conv2D(64, 3, padding='same', activation='relu')(x)          # [208,208,64]
+    x = tf.keras.layers.MaxPooling2D(2)(x)  # [104,104,64]
+    x = tf.keras.layers.Conv2D(128, 3, padding='same', activation='relu')(x)         # [104,104,128]
+    x = tf.keras.layers.MaxPooling2D(2)(x)  # [52,52,128]
+    x = tf.keras.layers.Conv2D(256, 3, padding='same', activation='relu')(x)         # [52,52,256]
 
-    x = tf.keras.layers.Conv2D(256, 3, padding='same', activation='relu')(x)
-    x = tf.keras.layers.Conv2D(NUM_LINES * (1 + 2 + NUM_CLASSES), 1, padding='same')(x)
-    x = tf.keras.layers.Reshape((GRID_SIZE, GRID_SIZE, NUM_LINES, 3 + NUM_CLASSES))(x)
+    # 추가된 다운샘플링 레이어들
+    x = tf.keras.layers.MaxPooling2D(2)(x)  # [26,26,256]
+    x = tf.keras.layers.Conv2D(512, 3, padding='same', activation='relu')(x)         # [26,26,512]
+    x = tf.keras.layers.MaxPooling2D(2)(x)  # [13,13,512]
 
-    # 출력 분리
+    # 마지막 출력 레이어
+    x = tf.keras.layers.Conv2D(NUM_LINES * (1 + 2 + NUM_CLASSES), 1, padding='same')(x)  # [13,13,12]
+    x = tf.keras.layers.Reshape((GRID_SIZE, GRID_SIZE, NUM_LINES, 3 + NUM_CLASSES))(x)    # [13,13,3,4]
+
+    # 이후 동일
     line_confidence = tf.sigmoid(x[..., 0])  # 직선 존재 확률
     rho = x[..., 1]  # rho: [0, 1]로 정규화된 값
     theta = x[..., 2]  # theta: [-π, π] 범위
@@ -41,133 +47,170 @@ def create_line_detection_model():
     model = tf.keras.models.Model(inputs=inputs, outputs=outputs)
     return model
 
-# 손실 함수 정의
 def line_detection_loss(y_true, y_pred):
-    """
-    y_true와 y_pred의 형태:
-    [batch_size, GRID_SIZE, GRID_SIZE, NUM_LINES, 3 + NUM_CLASSES]
-    """
-    # 직선 존재 여부 손실 (Binary Cross-Entropy)
     obj_mask = y_true[..., 0]
     confidence_loss = tf.keras.losses.binary_crossentropy(obj_mask, y_pred[..., 0])
 
-    # 파라미터 손실
-    # rho 손실 (Mean Squared Error)
     rho_loss = tf.square(y_true[..., 1] - y_pred[..., 1])
 
-    # theta 손실 (주기성 고려)
     theta_diff = y_true[..., 2] - y_pred[..., 2]
-    theta_diff = tf.math.floormod(theta_diff + np.pi, 2 * np.pi) - np.pi  # [-π, π] 범위로 조정
+    theta_diff = tf.math.floormod(theta_diff + np.pi, 2 * np.pi) - np.pi
     theta_loss = tf.square(theta_diff)
 
     param_loss = rho_loss + theta_loss
-    param_loss = obj_mask * param_loss  # 직선이 존재하는 곳만 계산
+    param_loss = obj_mask * param_loss
 
-    # 총 손실 계산
     total_loss = tf.reduce_mean(confidence_loss + param_loss)
     return total_loss
 
-# 데이터 로더 구현
 def load_data(data_dir, batch_size):
+    # 이미지 파일과 레이블 파일의 전체 경로를 생성
     image_files = [f for f in os.listdir(data_dir) if f.lower().endswith(('.jpg', '.png', '.jpeg'))]
     image_files.sort()
 
-    dataset = tf.data.Dataset.from_tensor_slices(image_files)
+    image_paths = [os.path.join(data_dir, f) for f in image_files]
+    label_paths = [os.path.join(data_dir, os.path.splitext(f)[0] + '.txt') for f in image_files]
 
-    def parse_function(filename):
+    dataset = tf.data.Dataset.from_tensor_slices((image_paths, label_paths))
+
+    def parse_function(image_path, label_path):
         # 이미지 로드 및 전처리
-        image_path = os.path.join(data_dir, filename)
         image = tf.io.read_file(image_path)
         image = tf.image.decode_jpeg(image, channels=3)
         image = tf.image.resize(image, [INPUT_SIZE, INPUT_SIZE])
         image = image / 255.0  # 정규화
 
         # 레이블 파일 로드
-        label_filename = tf.strings.regex_replace(filename, '\.[^.]+$', '.txt')
-        label_path = os.path.join(data_dir, label_filename)
         labels = tf.io.read_file(label_path)
         labels = tf.strings.strip(labels)
-        labels = tf.strings.split(labels, '\n')
-        labels = tf.strings.split(labels, ' ')
-        labels = tf.strings.to_number(labels, out_type=tf.float32)
-        labels = tf.reshape(labels, [-1, 2])  # [num_lines, 2]
+        lines = tf.strings.split(labels, '\n')
 
-        # 그리드 셀에 맞게 레이블 매핑
-        label_tensor = tf.zeros((GRID_SIZE, GRID_SIZE, NUM_LINES, 3 + NUM_CLASSES), dtype=tf.float32)
+        # 각 줄을 공백으로 분할하여 (rho, theta)로 변환
+        splits = tf.strings.split(lines, ' ')
+        labels = tf.strings.to_number(splits, out_type=tf.float32)
+        labels = labels.to_tensor(default_value=0.0)  # [num_labels, 2]
+
+        num_labels = tf.shape(labels)[0]
+
+        # 레이블에서 rho와 theta 추출
+        rho = labels[:, 0]  # [num_labels]
+        theta = labels[:, 1]  # [num_labels]
+
+        cos_theta = tf.cos(theta)  # [num_labels]
+        sin_theta = tf.sin(theta)  # [num_labels]
 
         # 그리드 셀의 좌표 계산
         grid_x = tf.linspace(0.0, 1.0, GRID_SIZE + 1)
         grid_y = tf.linspace(0.0, 1.0, GRID_SIZE + 1)
-        grid_x = (grid_x[:-1] + grid_x[1:]) / 2  # 그리드 셀의 중심 x 좌표
-        grid_y = (grid_y[:-1] + grid_y[1:]) / 2  # 그리드 셀의 중심 y 좌표
-        grid_x, grid_y = tf.meshgrid(grid_x, grid_y)
+        grid_x = (grid_x[:-1] + grid_x[1:]) / 2  # [GRID_SIZE]
+        grid_y = (grid_y[:-1] + grid_y[1:]) / 2  # [GRID_SIZE]
+        grid_x, grid_y = tf.meshgrid(grid_x, grid_y)  # [GRID_SIZE, GRID_SIZE]
         grid_centers = tf.stack([grid_x, grid_y], axis=-1)  # [GRID_SIZE, GRID_SIZE, 2]
 
-        for rho_theta in labels:
-            rho = rho_theta[0]
-            theta = rho_theta[1]
+        # 모든 레이블과 그리드 셀에 대해 선과의 거리 계산
+        # grid_centers를 [1, GRID_SIZE, GRID_SIZE, 2]로 확장
+        grid_centers_expanded = tf.expand_dims(grid_centers, axis=0)  # [1, GRID_SIZE, GRID_SIZE, 2]
+        # rho, cos_theta, sin_theta를 [num_labels, 1, 1, 1]로 확장
+        rho_expanded = tf.reshape(rho, [-1, 1, 1, 1])  # [num_labels, 1, 1, 1]
+        cos_theta_expanded = tf.reshape(cos_theta, [-1, 1, 1, 1])  # [num_labels, 1, 1, 1]
+        sin_theta_expanded = tf.reshape(sin_theta, [-1, 1, 1, 1])  # [num_labels, 1, 1, 1]
 
-            # 선의 방정식: x * cos(theta) + y * sin(theta) = rho
-            cos_theta = tf.math.cos(theta)
-            sin_theta = tf.math.sin(theta)
+        # 거리 계산
+        x = grid_centers_expanded[..., 0]  # [1, GRID_SIZE, GRID_SIZE]
+        y = grid_centers_expanded[..., 1]  # [1, GRID_SIZE, GRID_SIZE]
 
-            # 그리드 셀의 중심 좌표 대입하여 선과의 거리 계산
-            distances = grid_centers[..., 0] * cos_theta + grid_centers[..., 1] * sin_theta - rho
-            distances = tf.abs(distances)
+        distances = x * cos_theta_expanded + y * sin_theta_expanded - rho_expanded  # [num_labels, GRID_SIZE, GRID_SIZE]
+        distances = tf.abs(distances)
 
-            # 일정 임계값 이하인 그리드 셀을 선이 통과한다고 간주
-            threshold = 1.0 / GRID_SIZE  # 그리드 셀 크기에 비례하여 임계값 설정
-            mask = distances < threshold  # [GRID_SIZE, GRID_SIZE]
+        # 임계값 설정
+        threshold = 1.0 / GRID_SIZE  # 스칼라
 
-            # 레이블 텐서에 값 설정
-            mask = tf.cast(mask, tf.float32)
-            for i in range(NUM_LINES):
-                existing_mask = label_tensor[..., i, 0]
-                vacant = tf.cast(existing_mask == 0, tf.float32)
-                update_mask = mask * vacant
+        # 마스크 생성
+        mask = distances < threshold  # [num_labels, GRID_SIZE, GRID_SIZE]
 
-                label_tensor = tf.tensor_scatter_nd_update(
-                    label_tensor,
-                    tf.where(update_mask > 0),
-                    tf.tile([[1.0, rho, theta]], [tf.reduce_sum(tf.cast(update_mask > 0, tf.int32)), 1])
-                )
+        # 레이블 텐서 초기화
+        label_tensor = tf.zeros((GRID_SIZE, GRID_SIZE, NUM_LINES, 3 + NUM_CLASSES), dtype=tf.float32)
+
+        # 각 그리드 셀에 대해 처리
+        for line_idx in range(NUM_LINES):
+            # line_idx를 int64로 캐스팅
+            line_idx = tf.cast(line_idx, tf.int64)
+
+            # 현재 라인에 이미 레이블이 할당된 위치 확인
+            existing_mask = label_tensor[..., line_idx, 0] > 0  # [GRID_SIZE, GRID_SIZE]
+
+            # 현재 라인에 레이블이 비어있는 위치
+            vacant_mask = tf.logical_not(existing_mask)  # [GRID_SIZE, GRID_SIZE]
+
+            # 각 레이블에 대해 처리
+            for label_idx in range(num_labels):
+                # label_idx를 int64로 캐스팅
+                label_idx = tf.cast(label_idx, tf.int64)
+
+                # 해당 레이블의 마스크 추출
+                label_mask = mask[label_idx]  # [GRID_SIZE, GRID_SIZE]
+
+                # 빈 위치와 겹치는 부분 찾기
+                update_mask = tf.logical_and(vacant_mask, label_mask)  # [GRID_SIZE, GRID_SIZE]
+
+                # 업데이트할 위치의 인덱스 추출
+                indices = tf.where(update_mask)  # [num_updates, 2], dtype=int64
+
+                num_updates = tf.shape(indices)[0]
+                if num_updates == 0:
+                    continue
+
+                # 업데이트할 값 생성
+                updates = tf.tile([[1.0, rho[label_idx], theta[label_idx]]], [num_updates, 1])  # [num_updates, 3]
+
+                # 인덱스에 라인 인덱스 추가
+                line_indices = tf.fill([num_updates, 1], line_idx)  # [num_updates, 1], dtype=int64
+                indices_full = tf.concat([indices, line_indices], axis=1)  # [num_updates, 3], dtype=int64
+
+                # 업데이트할 채널 인덱스 생성 (0: 존재 여부, 1: rho, 2: theta)
+                for channel_idx in range(3):
+                    # channel_idx를 int64로 캐스팅
+                    channel_idx = tf.cast(channel_idx, tf.int64)
+
+                    channel_indices = tf.fill([num_updates, 1], channel_idx)  # [num_updates, 1], dtype=int64
+                    indices_to_update = tf.concat([indices_full, channel_indices],
+                                                  axis=1)  # [num_updates, 4], dtype=int64
+                    updates_channel = updates[:, channel_idx]
+
+                    # 레이블 텐서 업데이트
+                    label_tensor = tf.tensor_scatter_nd_update(label_tensor, indices_to_update, updates_channel)
+
+                # 업데이트된 위치를 vacant_mask에 반영
+                vacant_updates = tf.fill([num_updates], False)
+                vacant_mask = tf.tensor_scatter_nd_update(vacant_mask, indices, vacant_updates)
 
         return image, label_tensor
 
-    dataset = dataset.map(parse_function)
+    dataset = dataset.map(parse_function, num_parallel_calls=tf.data.experimental.AUTOTUNE)
     dataset = dataset.shuffle(buffer_size=1000)
     dataset = dataset.batch(batch_size)
-    dataset = dataset.repeat()
+    dataset = dataset.prefetch(tf.data.experimental.AUTOTUNE)
     return dataset
 
-# 모델 인스턴스 생성
 model = create_line_detection_model()
 model.summary()
 
-# 옵티마이저 및 컴파일 설정
 optimizer = tf.keras.optimizers.Adam(learning_rate=0.001)
 model.compile(optimizer=optimizer, loss=line_detection_loss)
 
-# 학습 루프 실행
 batch_size = 8
 steps_per_epoch = 100
 epochs = 10
 
-# 데이터 디렉토리 지정
-data_dir = 'path/to/data'
+data_dir = r'D:\Work\04_Samsung_Pyeongtak_WIND2\Data'
 
 train_data = load_data(data_dir, batch_size)
 model.fit(train_data, steps_per_epoch=steps_per_epoch, epochs=epochs)
 
-# 추론 예시
 def inference(model, image):
-    """
-    단일 이미지에 대한 추론을 수행하고 예측된 직선을 반환합니다.
-    """
-    image = tf.expand_dims(image, axis=0)  # 배치 차원 추가
+    image = tf.expand_dims(image, axis=0)
     preds = model.predict(image)
 
-    # 직선 존재 확률이 임계값 이상인 예측만 선택
     confidence_threshold = 0.5
     line_confidences = preds[0, ..., 0]
     rhos = preds[0, ..., 1]
@@ -184,8 +227,7 @@ def inference(model, image):
 
     return detected_lines
 
-# 추론 테스트
-test_image_path = 'path/to/test_image.jpg'  # 테스트할 이미지의 경로로 수정하세요
+test_image_path = r'D:\Work\04_Samsung_Pyeongtak_WIND2\Data\FAIL_1.00_after.jpg'
 image = tf.io.read_file(test_image_path)
 image = tf.image.decode_jpeg(image, channels=3)
 image = tf.image.resize(image, [INPUT_SIZE, INPUT_SIZE])
