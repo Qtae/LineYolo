@@ -9,7 +9,7 @@ INPUT_SIZE = 416
 GRID_SIZE = 13
 NUM_LINES = 3
 NUM_CLASSES = 1
-TRAIN_VAL_SPLIT = 0.2
+TRAIN_VAL_SPLIT = 0.05
 
 
 def route_group(input_layer, groups, group_id):
@@ -80,53 +80,23 @@ def cspdarknet53_tiny(input_data):
     return input_data
 
 
-def create_line_detection_model():
-    inputs = tf.keras.layers.Input([INPUT_SIZE, INPUT_SIZE, 3])
-
-    x = tf.keras.layers.Conv2D(32, 3, padding='same', activation='relu')(inputs)    # [416,416,32]
-    x = tf.keras.layers.MaxPooling2D(2)(x)  # [208,208,32]
-    x = tf.keras.layers.Conv2D(64, 3, padding='same', activation='relu')(x)          # [208,208,64]
-    x = tf.keras.layers.MaxPooling2D(2)(x)  # [104,104,64]
-    x = tf.keras.layers.Conv2D(128, 3, padding='same', activation='relu')(x)         # [104,104,128]
-    x = tf.keras.layers.MaxPooling2D(2)(x)  # [52,52,128]
-    x = tf.keras.layers.Conv2D(256, 3, padding='same', activation='relu')(x)         # [52,52,256]
-
-    x = tf.keras.layers.MaxPooling2D(2)(x)  # [26,26,256]
-    x = tf.keras.layers.Conv2D(512, 3, padding='same', activation='relu')(x)         # [26,26,512]
-    x = tf.keras.layers.MaxPooling2D(2)(x)  # [13,13,512]
-
-    x = tf.keras.layers.Conv2D(NUM_LINES * (1 + 2 + NUM_CLASSES), 1, padding='same')(x)  # [13,13,12]
-    x = tf.keras.layers.Reshape((GRID_SIZE, GRID_SIZE, NUM_LINES, 3 + NUM_CLASSES))(x)    # [13,13,3,4]
-
-    line_confidence = tf.sigmoid(x[..., 0])
-    rho = tf.sigmoid(x[..., 1])
-    theta = x[..., 2]
-
-    theta = tf.tanh(theta) * np.pi
-
-    if NUM_CLASSES > 1:
-        class_probs = tf.nn.softmax(x[..., 3:])
-    else:
-        class_probs = tf.sigmoid(x[..., 3])
-
-    outputs = tf.concat([line_confidence[..., tf.newaxis],
-                         rho[..., tf.newaxis],
-                         theta[..., tf.newaxis],
-                         class_probs[..., tf.newaxis]],
-                        axis=-1)
-    return tf.keras.models.Model(inputs=inputs, outputs=outputs)
-
-
 # def create_line_detection_model():
 #     inputs = tf.keras.layers.Input([INPUT_SIZE, INPUT_SIZE, 3])
 #
-#     x = cspdarknet53_tiny(inputs)
+#     x = tf.keras.layers.Conv2D(32, 3, padding='same', activation='relu')(inputs)    # [416,416,32]
+#     x = tf.keras.layers.MaxPooling2D(2)(x)  # [208,208,32]
+#     x = tf.keras.layers.Conv2D(64, 3, padding='same', activation='relu')(x)          # [208,208,64]
+#     x = tf.keras.layers.MaxPooling2D(2)(x)  # [104,104,64]
+#     x = tf.keras.layers.Conv2D(128, 3, padding='same', activation='relu')(x)         # [104,104,128]
+#     x = tf.keras.layers.MaxPooling2D(2)(x)  # [52,52,128]
+#     x = tf.keras.layers.Conv2D(256, 3, padding='same', activation='relu')(x)         # [52,52,256]
 #
-#     global GRID_SIZE
-#     GRID_SIZE = x.shape[1]
+#     x = tf.keras.layers.MaxPooling2D(2)(x)  # [26,26,256]
+#     x = tf.keras.layers.Conv2D(512, 3, padding='same', activation='relu')(x)         # [26,26,512]
+#     x = tf.keras.layers.MaxPooling2D(2)(x)  # [13,13,512]
 #
-#     x = tf.keras.layers.Conv2D(NUM_LINES * (1 + 2 + NUM_CLASSES), 1, padding='same')(x)
-#     x = tf.keras.layers.Reshape((GRID_SIZE, GRID_SIZE, NUM_LINES, 3 + NUM_CLASSES))(x)
+#     x = tf.keras.layers.Conv2D(NUM_LINES * (1 + 2 + NUM_CLASSES), 1, padding='same')(x)  # [13,13,12]
+#     x = tf.keras.layers.Reshape((GRID_SIZE, GRID_SIZE, NUM_LINES, 3 + NUM_CLASSES))(x)    # [13,13,3,4]
 #
 #     line_confidence = tf.sigmoid(x[..., 0])
 #     rho = tf.sigmoid(x[..., 1])
@@ -145,6 +115,36 @@ def create_line_detection_model():
 #                          class_probs[..., tf.newaxis]],
 #                         axis=-1)
 #     return tf.keras.models.Model(inputs=inputs, outputs=outputs)
+
+
+def create_line_detection_model():
+    inputs = tf.keras.layers.Input([INPUT_SIZE, INPUT_SIZE, 3])
+
+    x = cspdarknet53_tiny(inputs)
+
+    global GRID_SIZE
+    GRID_SIZE = x.shape[1]
+
+    x = tf.keras.layers.Conv2D(NUM_LINES * (1 + 2 + NUM_CLASSES), 1, padding='same')(x)
+    x = tf.keras.layers.Reshape((GRID_SIZE, GRID_SIZE, NUM_LINES, 3 + NUM_CLASSES))(x)
+
+    line_confidence = tf.sigmoid(x[..., 0])
+    rho = tf.sigmoid(x[..., 1])
+    theta = x[..., 2]
+
+    theta = tf.tanh(theta) * np.pi
+
+    if NUM_CLASSES > 1:
+        class_probs = tf.nn.softmax(x[..., 3:])
+    else:
+        class_probs = tf.sigmoid(x[..., 3])
+
+    outputs = tf.concat([line_confidence[..., tf.newaxis],
+                         rho[..., tf.newaxis],
+                         theta[..., tf.newaxis],
+                         class_probs[..., tf.newaxis]],
+                        axis=-1)
+    return tf.keras.models.Model(inputs=inputs, outputs=outputs)
 
 
 def line_detection_loss(y_true, y_pred):
@@ -305,14 +305,6 @@ model = create_line_detection_model()
 model.summary()
 
 # Model compilation
-optimizer = tf.keras.optimizers.Adam(learning_rate=0.001)
-model.compile(optimizer=optimizer, loss=line_detection_loss)
-
-early_stopping = tf.keras.callbacks.EarlyStopping(
-    monitor='val_loss',
-    patience=5,
-    restore_best_weights=True
-)
 
 lr_schedule = tf.keras.optimizers.schedules.ExponentialDecay(
     initial_learning_rate=0.001,
@@ -321,8 +313,15 @@ lr_schedule = tf.keras.optimizers.schedules.ExponentialDecay(
     staircase=True)
 optimizer = tf.keras.optimizers.Adam(learning_rate=lr_schedule)
 
+model.compile(optimizer=optimizer, loss=line_detection_loss)
+
+early_stopping = tf.keras.callbacks.EarlyStopping(
+    monitor='val_loss',
+    patience=50,
+    restore_best_weights=True)
+
 # Training
-epochs = 100
+epochs = 500
 
 model.fit(train_dataset,
           steps_per_epoch=steps_per_epoch,
