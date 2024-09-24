@@ -2,6 +2,7 @@ import tensorflow as tf
 import numpy as np
 import os
 import cv2
+import datetime
 
 # Constants
 INPUT_SIZE = 416
@@ -9,20 +10,6 @@ GRID_SIZE = 13
 NUM_LINES = 3
 NUM_CLASSES = 1
 TRAIN_VAL_SPLIT = 0.2
-
-
-class BatchNormalization(tf.keras.layers.BatchNormalization):
-    """
-    "Frozen state" and "inference mode" are two separate concepts.
-    `layer.trainable = False` is to freeze the layer, so the layer will use
-    stored moving `var` and `mean` in the "inference mode", and both `gama`
-    and `beta` will not be updated !
-    """
-    def call(self, x, training=False):
-        if not training:
-            training = tf.constant(False)
-        training = tf.logical_and(training, self.trainable)
-        return super().call(x, training)
 
 
 def route_group(input_layer, groups, group_id):
@@ -43,7 +30,7 @@ def convolutional(input_layer, filters_shape, strides=1, padding='same',
                                   kernel_initializer=kernal_initializer,
                                   bias_initializer=tf.constant_initializer(0.))(input_layer)
 
-    if bn: conv = BatchNormalization()(conv)
+    if bn: conv = tf.keras.layers.BatchNormalization()(conv)
 
     if activate == True:
         if activate_type == "leaky":
@@ -323,12 +310,17 @@ early_stopping = tf.keras.callbacks.EarlyStopping(
 
 # Training
 epochs = 100
+
 model.fit(train_dataset,
           steps_per_epoch=steps_per_epoch,
           validation_data=valid_dataset,
           validation_steps=validation_steps,
           epochs=epochs,
           callbacks=[early_stopping])
+save_dir = os.path.join('./models', datetime.datetime.now().strftime("%Y-%m-%d_%Hh%Mm%Ss"))
+if not os.path.exists(save_dir):
+    os.makedirs(save_dir)
+model.save(save_dir, overwrite=True)
 
 
 def inference_and_display(model, image_paths):
