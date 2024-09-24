@@ -150,24 +150,30 @@ def create_line_detection_model():
 def line_detection_loss(y_true, y_pred):
     obj_mask = y_true[..., 0]
     pred_confidence = y_pred[..., 0]
-    lambda_obj = 5.0
-    lambda_noobj = 1.0
 
-    confidence_loss_obj = lambda_obj * obj_mask * tf.keras.backend.binary_crossentropy(obj_mask, pred_confidence)
-    confidence_loss_noobj = lambda_noobj * (1 - obj_mask) * tf.keras.backend.binary_crossentropy(obj_mask, pred_confidence)
-    confidence_loss = tf.reduce_sum(confidence_loss_obj + confidence_loss_noobj) / (GRID_SIZE * GRID_SIZE * NUM_LINES)
+    confidence_loss = tf.keras.backend.binary_crossentropy(obj_mask, pred_confidence)
+    confidence_loss = tf.reduce_sum(confidence_loss) / (GRID_SIZE * GRID_SIZE * NUM_LINES)
 
-    rho_loss = tf.square(y_true[..., 1] - y_pred[..., 1])
-    theta_diff = y_true[..., 2] - y_pred[..., 2]
-    theta_diff = tf.math.floormod(theta_diff + np.pi, 2 * np.pi) - np.pi
-    theta_loss = tf.square(theta_diff / np.pi)
-    param_loss = rho_loss + theta_loss
-    param_loss = obj_mask * param_loss
-    param_loss = tf.reduce_sum(param_loss) / (tf.reduce_sum(obj_mask) + 1e-6)
+    rho_loss = smooth_l1_loss(y_true[..., 1], y_pred[..., 1])
+    rho_loss = obj_mask * rho_loss
+    rho_loss = tf.reduce_sum(rho_loss) / (tf.reduce_sum(obj_mask) + 1e-6)
 
-    lambda_coord = 5.0
-    total_loss = confidence_loss + lambda_coord * param_loss
+    theta_loss = 1 - tf.cos(y_true[..., 2] - y_pred[..., 2])
+    theta_loss = obj_mask * theta_loss
+    theta_loss = tf.reduce_sum(theta_loss) / (tf.reduce_sum(obj_mask) + 1e-6)
+
+    lambda_conf = 1.0
+    lambda_rho = 5.0
+    lambda_theta = 1.0
+
+    total_loss = lambda_conf * confidence_loss + lambda_rho * rho_loss + lambda_theta * theta_loss
     return total_loss
+
+def smooth_l1_loss(y_true, y_pred):
+    abs_diff = tf.abs(y_true - y_pred)
+    sq_diff = 0.5 * tf.square(y_true - y_pred)
+    loss = tf.where(abs_diff < 1.0, sq_diff, abs_diff - 0.5)
+    return loss
 
 
 def load_data(data_dir, batch_size, valid_ratio):
@@ -307,6 +313,13 @@ early_stopping = tf.keras.callbacks.EarlyStopping(
     patience=5,
     restore_best_weights=True
 )
+
+lr_schedule = tf.keras.optimizers.schedules.ExponentialDecay(
+    initial_learning_rate=0.001,
+    decay_steps=10000,
+    decay_rate=0.96,
+    staircase=True)
+optimizer = tf.keras.optimizers.Adam(learning_rate=lr_schedule)
 
 # Training
 epochs = 100
