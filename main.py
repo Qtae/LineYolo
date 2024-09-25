@@ -9,7 +9,7 @@ INPUT_SIZE = 416
 GRID_SIZE = 13
 NUM_LINES = 3
 NUM_CLASSES = 1
-TRAIN_VAL_SPLIT = 0.05
+TRAIN_VAL_SPLIT = 0.1
 
 
 def route_group(input_layer, groups, group_id):
@@ -130,20 +130,23 @@ def create_line_detection_model():
 
     line_confidence = tf.sigmoid(x[..., 0])
     rho = tf.sigmoid(x[..., 1])
-    theta = x[..., 2]
 
-    theta = tf.tanh(theta) * np.pi
+    sin_theta = tf.sin(x[..., 2])
+    cos_theta = tf.cos(x[..., 2])
 
     if NUM_CLASSES > 1:
         class_probs = tf.nn.softmax(x[..., 3:])
     else:
         class_probs = tf.sigmoid(x[..., 3])
 
-    outputs = tf.concat([line_confidence[..., tf.newaxis],
-                         rho[..., tf.newaxis],
-                         theta[..., tf.newaxis],
-                         class_probs[..., tf.newaxis]],
-                        axis=-1)
+    outputs = tf.concat([
+        line_confidence[..., tf.newaxis],
+        rho[..., tf.newaxis],
+        sin_theta[..., tf.newaxis],
+        cos_theta[..., tf.newaxis],
+        class_probs[..., tf.newaxis]
+    ], axis=-1)
+
     return tf.keras.models.Model(inputs=inputs, outputs=outputs)
 
 
@@ -151,22 +154,24 @@ def line_detection_loss(y_true, y_pred):
     obj_mask = y_true[..., 0]
     pred_confidence = y_pred[..., 0]
 
-    confidence_loss = tf.keras.backend.binary_crossentropy(obj_mask, pred_confidence)
-    confidence_loss = tf.reduce_sum(confidence_loss) / (GRID_SIZE * GRID_SIZE * NUM_LINES)
+    confidence_loss = tf.keras.losses.binary_crossentropy(obj_mask, pred_confidence)
+    confidence_loss = tf.reduce_mean(confidence_loss)
 
-    rho_loss = smooth_l1_loss(y_true[..., 1], y_pred[..., 1])
+    rho_loss = tf.square(y_true[..., 1] - y_pred[..., 1])
     rho_loss = obj_mask * rho_loss
     rho_loss = tf.reduce_sum(rho_loss) / (tf.reduce_sum(obj_mask) + 1e-6)
 
-    theta_loss = 1 - tf.cos(y_true[..., 2] - y_pred[..., 2])
+    sin_theta_true = tf.sin(y_true[..., 2])
+    cos_theta_true = tf.cos(y_true[..., 2])
+
+    sin_theta_pred = y_pred[..., 2]
+    cos_theta_pred = y_pred[..., 3]
+
+    theta_loss = tf.square(sin_theta_true - sin_theta_pred) + tf.square(cos_theta_true - cos_theta_pred)
     theta_loss = obj_mask * theta_loss
     theta_loss = tf.reduce_sum(theta_loss) / (tf.reduce_sum(obj_mask) + 1e-6)
 
-    lambda_conf = 1.0
-    lambda_rho = 5.0
-    lambda_theta = 1.0
-
-    total_loss = lambda_conf * confidence_loss + lambda_rho * rho_loss + lambda_theta * theta_loss
+    total_loss = confidence_loss + rho_loss + theta_loss
     return total_loss
 
 def smooth_l1_loss(y_true, y_pred):
@@ -307,11 +312,11 @@ model.summary()
 # Model compilation
 
 lr_schedule = tf.keras.optimizers.schedules.ExponentialDecay(
-    initial_learning_rate=0.001,
+    initial_learning_rate=0.0001,
     decay_steps=10000,
     decay_rate=0.96,
     staircase=True)
-optimizer = tf.keras.optimizers.Adam(learning_rate=lr_schedule)
+optimizer = tf.keras.optimizers.RMSprop(learning_rate=lr_schedule)
 
 model.compile(optimizer=optimizer, loss=line_detection_loss)
 
@@ -321,7 +326,7 @@ early_stopping = tf.keras.callbacks.EarlyStopping(
     restore_best_weights=True)
 
 # Training
-epochs = 500
+epochs = 1000
 
 model.fit(train_dataset,
           steps_per_epoch=steps_per_epoch,
@@ -362,7 +367,9 @@ def inference_and_display(model, image_paths):
                     confidence = preds[i, j, k, 0]
                     if confidence > 0.5:
                         rho = preds[i, j, k, 1]
-                        theta = preds[i, j, k, 2]
+                        sin_theta = preds[i, j, k, 2]
+                        cos_theta = preds[i, j, k, 3]
+                        theta = np.arctan2(sin_theta, cos_theta)
 
                         rho = rho * resized_diagonal
                         rho = rho * rho_scale
